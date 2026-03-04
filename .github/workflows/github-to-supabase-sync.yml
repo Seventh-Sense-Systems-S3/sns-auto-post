@@ -1,0 +1,35 @@
+name: GitHub to Supabase Sync
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  pull_request:
+    types: [opened, closed, synchronize, reopened, labeled, unlabeled, review_requested]
+  schedule:
+    - cron: '0 0 * * *'  # Daily at 9:00 JST
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Skip bot-triggered events
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install httpx supabase
+      - name: Sync to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python scripts/sync_github_to_supabase.py --full-sync
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            python scripts/sync_github_to_supabase.py --sync-prs
+          else
+            python scripts/sync_github_to_supabase.py --sync-all
+          fi
