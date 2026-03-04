@@ -28,12 +28,42 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { platforms, ...postData } = parsed.data;
+    const { platforms, org_id, ...postData } = parsed.data;
+
+    // Verify user is a member of the org
+    const { data: membership, error: membershipError } = await supabase
+      .from("sns_org_members")
+      .select("role")
+      .eq("org_id", org_id)
+      .eq("user_id", user.id)
+      .single();
+
+    if (membershipError || !membership) {
+      return NextResponse.json(
+        {
+          error: "Not a member of this organization",
+          code: "FORBIDDEN",
+        },
+        { status: 403 },
+      );
+    }
+
+    // Viewers cannot create posts
+    if (membership.role === "viewer") {
+      return NextResponse.json(
+        {
+          error: "Viewers cannot create posts",
+          code: "FORBIDDEN",
+        },
+        { status: 403 },
+      );
+    }
 
     const { data: post, error } = await supabase
       .from("sns_posts")
       .insert({
         user_id: user.id,
+        org_id,
         status: "draft",
         ...postData,
       })
@@ -85,16 +115,45 @@ export async function GET(request: NextRequest) {
     const { searchParams } = request.nextUrl;
     const status = searchParams.get("status");
     const platform = searchParams.get("platform");
+    const orgId = searchParams.get("org_id") || request.headers.get("X-Org-Id");
     const limit = Math.min(
       parseInt(searchParams.get("limit") || "20", 10),
       100,
     );
     const offset = parseInt(searchParams.get("offset") || "0", 10);
 
+    if (!orgId) {
+      return NextResponse.json(
+        {
+          error: "org_id query parameter or X-Org-Id header is required",
+          code: "VALIDATION_ERROR",
+        },
+        { status: 400 },
+      );
+    }
+
+    // Verify user is a member of the org
+    const { data: membership, error: membershipError } = await supabase
+      .from("sns_org_members")
+      .select("role")
+      .eq("org_id", orgId)
+      .eq("user_id", user.id)
+      .single();
+
+    if (membershipError || !membership) {
+      return NextResponse.json(
+        {
+          error: "Not a member of this organization",
+          code: "FORBIDDEN",
+        },
+        { status: 403 },
+      );
+    }
+
     let query = supabase
       .from("sns_posts")
       .select("*", { count: "exact" })
-      .eq("user_id", user.id)
+      .eq("org_id", orgId)
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
 
