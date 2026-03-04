@@ -1,115 +1,114 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { canPublish } from "@/utils/rate-limiter";
+import { schedulePublishJob } from "@/lib/queue/publisher.queue";
 
-type RouteContext = { params: Promise<{ id: string }> };
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const { id } = await params;
+  const supabase = await createSupabaseServerClient();
 
-export async function POST(_request: NextRequest, context: RouteContext) {
-  try {
-    const { id } = await context.params;
-    const supabase = await createSupabaseServerClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { error: "Unauthorized", code: "UNAUTHORIZED" },
-        { status: 401 },
-      );
-    }
-
-    // Check post exists and belongs to user
-    const { data: post, error: fetchError } = await supabase
-      .from("sns_posts")
-      .select("status, scheduled_at")
-      .eq("id", id)
-      .eq("user_id", user.id)
-      .single();
-
-    if (fetchError || !post) {
-      return NextResponse.json(
-        { error: "Post not found", code: "NOT_FOUND" },
-        { status: 404 },
-      );
-    }
-
-    if (post.status !== "approved" && post.status !== "scheduled") {
-      return NextResponse.json(
-        {
-          error: "Can only publish posts with approved or scheduled status",
-          code: "INVALID_STATUS",
-        },
-        { status: 409 },
-      );
-    }
-
-    // Determine target status based on scheduled_at
-    const isScheduled =
-      post.scheduled_at && new Date(post.scheduled_at) > new Date();
-    const newStatus = isScheduled ? "scheduled" : "publishing";
-
-    // Update post status
-    const { error: updateError } = await supabase
-      .from("sns_posts")
-      .update({
-        status: newStatus,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .eq("user_id", user.id);
-
-    if (updateError) {
-      return NextResponse.json(
-        { error: updateError.message, code: "DB_ERROR" },
-        { status: 500 },
-      );
-    }
-
-    // Get target platforms from adaptations
-    const { data: adaptations } = await supabase
-      .from("sns_post_adaptations")
-      .select("platform")
-      .eq("post_id", id);
-
-    if (!adaptations || adaptations.length === 0) {
-      return NextResponse.json(
-        {
-          error: "No platform adaptations found for this post",
-          code: "VALIDATION_ERROR",
-        },
-        { status: 400 },
-      );
-    }
-
-    // Create publish records for each target platform
-    const publishRecords = adaptations.map((a) => ({
-      post_id: id,
-      platform: a.platform,
-      status: "pending" as const,
-      retry_count: 0,
-    }));
-
-    const { data: publishes, error: publishError } = await supabase
-      .from("sns_post_publishes")
-      .insert(publishRecords)
-      .select();
-
-    if (publishError) {
-      return NextResponse.json(
-        { error: publishError.message, code: "DB_ERROR" },
-        { status: 500 },
-      );
-    }
-
-    // NOTE: Actual queue integration (QStash) will be handled by x-publish teammate
+  // Get authenticated user
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+  if (authError || !user) {
     return NextResponse.json(
-      { post_id: id, status: newStatus, publishes },
-      { status: 202 },
-    );
-  } catch {
-    return NextResponse.json(
-      { error: "Internal server error", code: "INTERNAL_ERROR" },
-      { status: 500 },
+      { error: "Unauthorized", code: "UNAUTHORIZED" },
+      { status: 401 },
     );
   }
+
+  // Get post
+  const { data: post, error: postError } = await supabase
+    .from("sns_posts")
+    .select("*")
+    .eq("id", id)
+    .eq("user_id", user.id)
+    .single();
+
+  if (postError || !post) {
+    return NextResponse.json(
+      { error: "Post not found", code: "NOT_FOUND" },
+      { status: 404 },
+    );
+  }
+
+  if (!["approved", "scheduled"].includes(post.status)) {
+    return NextResponse.json(
+      {
+        error: "Post must be approved before publishing",
+        code: "INVALID_STATUS",
+      },
+      { status: 409 },
+    );
+  }
+
+  // Parse body for target platforms
+  const body = await request.json().catch(() => ({}));
+  const platforms: string[] = body.platforms || ["x"]; // default to X
+
+  // Check rate limits for all platforms
+  for (const platform of platforms) {
+    const rateCheck = await canPublish(user.id, platform);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        {
+          error: `Rate limit exceeded for ${platform}`,
+          code: "RATE_LIMITED",
+          retryAfterSeconds: rateCheck.retryAfterSeconds,
+        },
+        { status: 429 },
+      );
+    }
+  }
+
+  // Create publish records and schedule jobs
+  const results = [];
+  for (const platform of platforms) {
+    // Upsert publish record
+    const { data: publish, error: publishError } = await supabase
+      .from("sns_post_publishes")
+      .upsert(
+        { post_id: id, platform, status: "pending" },
+        { onConflict: "post_id,platform" },
+      )
+      .select()
+      .single();
+
+    if (publishError || !publish) {
+      results.push({ platform, error: "Failed to create publish record" });
+      continue;
+    }
+
+    // Schedule via QStash
+    try {
+      await schedulePublishJob({
+        postId: id,
+        platform,
+        userId: user.id,
+        publishId: publish.id,
+      });
+      results.push({ platform, status: "queued", publishId: publish.id });
+    } catch (err) {
+      results.push({
+        platform,
+        error: err instanceof Error ? err.message : "Queue error",
+      });
+    }
+  }
+
+  // Update post status
+  await supabase
+    .from("sns_posts")
+    .update({ status: "publishing" })
+    .eq("id", id);
+
+  return NextResponse.json(
+    { message: "Publishing queued", results },
+    { status: 202 },
+  );
 }
