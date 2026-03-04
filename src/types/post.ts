@@ -26,6 +26,7 @@ export type Platform = z.infer<typeof Platform>;
 export const CreatePostSchema = z.object({
   title: z.string().optional(),
   content_original: z.string().min(1, "Content is required"),
+  org_id: z.string().uuid("Valid org_id is required"),
   scheduled_at: z.string().datetime().optional(),
   tags: z.array(z.string()).optional(),
   media_urls: z.array(z.string().url()).optional(),
@@ -48,6 +49,7 @@ export type UpdatePostInput = z.infer<typeof UpdatePostSchema>;
 export interface Post {
   id: string;
   user_id: string;
+  org_id: string | null;
   title: string | null;
   content_original: string;
   status: PostStatus;
