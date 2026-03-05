@@ -69,6 +69,134 @@ export async function GET(_request: NextRequest, context: RouteContext) {
   }
 }
 
+export async function PATCH(request: NextRequest, context: RouteContext) {
+  try {
+    const { orgId } = await context.params;
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json(
+        { error: "Unauthorized", code: "UNAUTHORIZED" },
+        { status: 401 },
+      );
+    }
+
+    // Verify the requesting user is owner or admin
+    const { data: membership, error: membershipError } = await supabase
+      .from("sns_org_members")
+      .select("role")
+      .eq("org_id", orgId)
+      .eq("user_id", user.id)
+      .single();
+
+    if (membershipError || !membership) {
+      return NextResponse.json(
+        { error: "Not a member of this organization", code: "FORBIDDEN" },
+        { status: 403 },
+      );
+    }
+
+    if (membership.role !== "owner" && membership.role !== "admin") {
+      return NextResponse.json(
+        {
+          error: "Only owners and admins can change roles",
+          code: "FORBIDDEN",
+        },
+        { status: 403 },
+      );
+    }
+
+    const body = (await request.json()) as { userId?: string; role?: string };
+    const userId = body.userId;
+    const nextRole = body.role;
+    const allowed = new Set(["owner", "admin", "editor", "viewer"]);
+
+    if (!userId || !nextRole || !allowed.has(nextRole)) {
+      return NextResponse.json(
+        {
+          error: "userId and valid role are required",
+          code: "VALIDATION_ERROR",
+        },
+        { status: 400 },
+      );
+    }
+
+    // Only owners can assign owner role
+    if (nextRole === "owner" && membership.role !== "owner") {
+      return NextResponse.json(
+        { error: "Only owners can assign owner role", code: "FORBIDDEN" },
+        { status: 403 },
+      );
+    }
+
+    // Prevent removing the last owner
+    if (nextRole !== "owner") {
+      const { data: targetMember } = await supabase
+        .from("sns_org_members")
+        .select("role")
+        .eq("org_id", orgId)
+        .eq("user_id", userId)
+        .single();
+
+      if (targetMember?.role === "owner") {
+        const { count } = await supabase
+          .from("sns_org_members")
+          .select("*", { count: "exact", head: true })
+          .eq("org_id", orgId)
+          .eq("role", "owner");
+
+        if (count !== null && count <= 1) {
+          return NextResponse.json(
+            {
+              error: "Cannot change the last owner role",
+              code: "LAST_OWNER",
+            },
+            { status: 409 },
+          );
+        }
+      }
+    }
+
+    const { data: updated, error } = await supabase
+      .from("sns_org_members")
+      .update({ role: nextRole })
+      .eq("org_id", orgId)
+      .eq("user_id", userId)
+      .select(
+        `
+        id,
+        role,
+        joined_at,
+        invited_by,
+        user:sns_users (
+          id,
+          email,
+          name,
+          avatar_url
+        )
+      `,
+      )
+      .single();
+
+    if (error || !updated) {
+      return NextResponse.json(
+        { error: error?.message || "Update failed", code: "DB_ERROR" },
+        { status: 500 },
+      );
+    }
+
+    return NextResponse.json({ data: updated });
+  } catch {
+    return NextResponse.json(
+      { error: "Internal server error", code: "INTERNAL_ERROR" },
+      { status: 500 },
+    );
+  }
+}
+
 export async function DELETE(request: NextRequest, context: RouteContext) {
   try {
     const { orgId } = await context.params;
