@@ -145,9 +145,8 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Supabase client type depends on generated DB types
 async function updatePublishStatus(
-  supabase: any,
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
   publishId: string,
   status: string,
   errorMessage: string | null,
