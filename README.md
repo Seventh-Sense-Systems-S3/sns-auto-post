@@ -1,3 +1,8 @@
+> **ARCHIVED**: This repository has been migrated to [7thSense-Monorepo](https://github.com/Seventh-Sense-Systems-S3/7thSense-Monorepo) at `apps/sns-auto-post/`.
+> All future development happens in the monorepo. See [ADR-018](https://github.com/Seventh-Sense-Systems-S3/7thSense-Monorepo/blob/main/docs/adr/ADR-018-sns-auto-post-monorepo-migration.md) for details.
+
+---
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
